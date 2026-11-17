@@ -25,7 +25,8 @@ except Exception:
     pass
 
 # Paths and constants
-MODEL_PATH = 'models/resnet50_crop_disease.h5'
+MODEL_PATH = 'models/phytosentinel_resnet50.keras'  # from notebooks/04_kaggle_finetune.ipynb
+CLASS_NAMES_PATH = 'results/class_names.json'  # committed, so a fresh clone only needs the weights
 DATA_DIR = 'data/plantvillage/plantvillage dataset/color'
 IMG_SIZE = (224, 224)
 PREFERRED_LAST_CONV = 'conv5_block3_out'
@@ -36,18 +37,25 @@ if not os.path.exists(MODEL_PATH):
 
 # Load model (no need to compile for inference)
 model = load_model(MODEL_PATH, compile=False)
+# Saved with the mixed_float16 policy used on the GPU. float16 falls back to slow kernels on most CPUs
+# (Grad-CAM took ~100 s per image), so compute in float32; the stored weights are float32 already.
+for layer in model.layers:
+    layer.dtype_policy = "float32"
 
 # Get class names (fallback to generic if folder missing)
-if os.path.isdir(DATA_DIR):
+if os.path.exists(CLASS_NAMES_PATH):
+    import json
+    with open(CLASS_NAMES_PATH) as f:
+        CLASSES = json.load(f)
+elif os.path.isdir(DATA_DIR):
     CLASSES = sorted([d for d in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR, d))])
 else:
     # Fallback to generic names using the model output size
     n_classes = int(model.output_shape[-1])
     CLASSES = [f"class_{i}" for i in range(n_classes)]
 
-# index->class and class->index mappings
+# index->class mapping
 class_indices = {i: cls for i, cls in enumerate(CLASSES)}
-indices_class = {v: k for k, v in class_indices.items()}
 
 # Auto-detect a valid last conv layer if preferred one is not present
 _def_last_conv = None
@@ -76,14 +84,15 @@ def _fig_to_numpy(fig):
     return img_rgb
 
 
-def get_gradcam_heatmap(img_array, model, last_conv_layer_name=_def_last_conv):
-    grad_model = tf.keras.models.Model([model.inputs], [model.get_layer(last_conv_layer_name).output, model.output])
+def get_gradcam_heatmap(img_array, raw_rgb, model, last_conv_layer_name=_def_last_conv):
+    grad_model = tf.keras.models.Model(model.inputs, [model.get_layer(last_conv_layer_name).output, model.output])
     with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model([img_array])
+        conv_outputs, predictions = grad_model(img_array)
         class_idx = tf.argmax(predictions[0])
         loss = predictions[:, class_idx]
 
-    grads = tape.gradient(loss, conv_outputs)
+    grads = tf.cast(tape.gradient(loss, conv_outputs), tf.float32)
+    conv_outputs = tf.cast(conv_outputs, tf.float32)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
     conv_outputs = conv_outputs[0]
     heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
@@ -95,7 +104,7 @@ def get_gradcam_heatmap(img_array, model, last_conv_layer_name=_def_last_conv):
     heatmap = cv2.resize(heatmap, IMG_SIZE)
     heatmap = np.uint8(255 * heatmap)
     heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    superimposed_img = heatmap * 0.4 + img_array[0] * 255
+    superimposed_img = np.clip(heatmap * 0.4 + cv2.cvtColor(raw_rgb, cv2.COLOR_RGB2BGR), 0, 255)
 
     return heatmap, superimposed_img.astype(np.uint8), int(class_idx.numpy())
 
@@ -105,16 +114,17 @@ def predict_image(img):
     if img is None:
         return np.zeros((IMG_SIZE[1], IMG_SIZE[0], 3), dtype=np.uint8)
 
-    img = img.resize(IMG_SIZE)
-    img_array = image.img_to_array(img)
-    img_array = np.expand_dims(img_array / 255.0, axis=0)
+    img = img.convert("RGB").resize(IMG_SIZE)
+    raw_rgb = image.img_to_array(img).astype(np.uint8)
+    # Must match training: ResNet50 preprocess_input on 0-255 pixels (not /255)
+    img_array = tf.keras.applications.resnet50.preprocess_input(raw_rgb[None].astype(np.float32))
 
     prediction = model.predict(img_array, verbose=0)
     predicted_class_idx = int(np.argmax(prediction[0]))
     confidence = float(prediction[0][predicted_class_idx])
     predicted_class = class_indices[predicted_class_idx]
 
-    heatmap, superimposed_img, _ = get_gradcam_heatmap(img_array, model)
+    heatmap, superimposed_img, _ = get_gradcam_heatmap(img_array, raw_rgb, model)
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
     ax1.imshow(img)
@@ -138,11 +148,5 @@ with gr.Blocks() as demo:
     output = gr.Image(type="numpy")
     image_input.change(fn=predict_image, inputs=image_input, outputs=output)
 
-# Launch locally, fallback to share if localhost blocked
-try:
-    demo.launch(inbrowser=True, server_name="127.0.0.1", server_port=None, show_error=True)
-except ValueError as e:
-    if "localhost is not accessible" in str(e):
-        demo.launch(share=True, server_name="0.0.0.0", server_port=None, show_error=True)
-    else:
-        raise
+# Local only. No share fallback: a failed localhost check must not publish the app on a public URL.
+demo.launch(inbrowser=True, server_name="127.0.0.1", show_error=True)

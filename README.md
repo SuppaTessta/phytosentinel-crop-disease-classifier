@@ -1,86 +1,74 @@
-# Crop Disease Detection
+# PhytoSentinel
 
-Detect crop diseases from leaf images using a ResNet50-based CNN with Grad-CAM visualizations.
+Crop disease classifier for leaf photos: ResNet50 (ImageNet) fine-tuned on the PlantVillage dataset (38 classes), with a Gradio demo that shows the predicted class, its confidence and a Grad-CAM heatmap.
 
-## Project Overview
-- Dataset: PlantVillage (38 classes) from Kaggle
-- Model: ResNet50 transfer learning, data augmentation, class weighting
-- Demo: Gradio UI for image upload, prediction, and Grad-CAM heatmap
+## Results (held-out test set)
+ResNet50 fine-tuned on PlantVillage `color` (38 classes, 54,305 images) on a Kaggle Tesla T4 in `notebooks/04_kaggle_finetune.ipynb`.
 
-## Requirements
-- Windows 10/11, Python 3.10+ (tested on 3.13)
-- A virtual environment at `.venv` (created by you or PyCharm)
-- GPU optional; CPU works but training is slower
+| Metric (test, n = 8,146) | Value |
+|---|---|
+| Accuracy | 98.53% |
+| Macro-F1 | 0.981 |
+| Weighted-F1 | 0.985 |
+| Top-5 accuracy | 99.95% |
 
-## Setup (cmd.exe)
+- Split: stratified 70/15/15 (38,013 / 8,146 / 8,146), seed 42. The test split is used once, after training.
+- Training: 5 epochs with the base frozen (head only, Adam 1e-3), then 10 epochs with the `conv5` block unfrozen (Adam 1e-5, BatchNorm frozen). Early stopping on val loss kept the best epoch (val accuracy 98.42%). Mixed precision, class weights, augmentation on train only, `resnet50.preprocess_input`.
+- Wall time: 63 min on one T4 (TensorFlow 2.21).
+- Weakest classes (test F1): Corn Cercospora/Gray leaf spot 0.90, Potato healthy 0.91, Tomato Target Spot 0.93.
+- Artifacts: `results/metrics.json` (with per-class report), `results/confusion_matrix.png`, `results/gradcam_samples.png`, `results/training_curves.png`.
+- The notebook's printed outputs are the Kaggle run's stdout log and saved figures, attached after download.
+- Caveat: PlantVillage images are lab photos on plain backgrounds, and a random split can put photos of the same leaf in both train and test, so expect lower accuracy on field images.
+
+**Superseded run:** `02_train_model.ipynb` is the original CPU run, kept for the record. It reached only 29.7% val accuracy because it rescaled inputs to [0, 1] instead of using ResNet50's `preprocess_input`, augmented the validation set, and never unfroze the base. `04_kaggle_finetune.ipynb` fixes all three and is the source of every number above.
+
+## Quickstart (Windows, cmd.exe)
+Tested on Windows 11, Python 3.12, CPU only. Python 3.10 to 3.13 should work. On macOS/Linux, activate with `source .venv/bin/activate` instead.
+
+On Windows, clone into a short path such as `C:\src`. TensorFlow's wheel contains files 163 characters deep, and pip fails with `No such file or directory` once the full path passes 260 characters, unless Windows long paths are enabled.
+
 ```cmd
-cd /d "C:\Users\sm01\PycharmProjects\Crop Disease Detection"
-
-:: create venv if you don't have one yet
+git clone https://github.com/SuppaTessta/phytosentinel-crop-disease-classifier.git
+cd phytosentinel-crop-disease-classifier
 python -m venv .venv
-
-:: activate venv
 call .venv\Scripts\activate.bat
-
-:: install dependencies
-python -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-## Dataset (optional if you already have it)
-Download from Kaggle and unzip. On Windows, use PowerShell's Expand-Archive.
+### Get the model weights
+The trained model (`phytosentinel_resnet50.keras`, 336 MB) is not in git. The demo loads it from `models/`; class names come from `results/class_names.json`. Retraining needs a Kaggle API token in `%USERPROFILE%\.kaggle\kaggle.json`.
 
+- **Retrain it yourself** on a free Kaggle GPU (about 65 min; GPU kernels need a phone-verified Kaggle account). Set your username in `kaggle/kernel-metadata.json`, then:
+  ```cmd
+  kaggle kernels push -p kaggle
+  kaggle kernels status YOUR_KAGGLE_USERNAME/phytosentinel-resnet50-finetune
+  kaggle kernels output YOUR_KAGGLE_USERNAME/phytosentinel-resnet50-finetune -p models
+  ```
+  Run the last command once the status shows complete.
+
+### Run the demo
 ```cmd
-:: ensure Kaggle is installed
-python -m pip install -U kaggle
-
-:: download zip into data/
-python -m kaggle datasets download -d abdallahalidev/plantvillage-dataset -p data
-
-:: unzip with PowerShell
-powershell -NoProfile -Command "Expand-Archive -Path 'data\plantvillage-dataset.zip' -DestinationPath 'data\plantvillage' -Force"
-```
-
-The expected images directory used by the code is:
-```
-data/plantvillage/plantvillage dataset/color
-```
-
-## Run the demo
-```cmd
-call .venv\Scripts\activate.bat
-set GRADIO_SERVER_NAME=127.0.0.1
-set GRADIO_SERVER_PORT=7861
 python 03_demo.py
 ```
-Then open http://127.0.0.1:7861 in your browser.
+It opens http://127.0.0.1:7860 in your browser (set `GRADIO_SERVER_PORT` to use another port). Upload a leaf image to see the image, the Grad-CAM heatmap and the overlay titled with the predicted class and confidence. On a laptop CPU the model loads in about 20 s; the first prediction takes about 8 s and later ones about 3 s.
 
-## Notes
-- If you see UndefinedMetricWarning in sklearn during evaluation, it means some classes had zero predicted samples; consider training longer or balancing data.
-- For unzip errors on Windows, use Expand-Archive as shown (no built-in `unzip` in cmd).
+## Notebooks
+| Notebook | What it does |
+|---|---|
+| `01_eda_crop_disease.ipynb` | Class counts (54,305 images, 38 classes, 36x max/min imbalance) and image sizes (a 100-image sample is all 256x256). |
+| `02_train_model.ipynb` | Superseded CPU run (29.7% val accuracy), see above. |
+| `notebooks/04_kaggle_finetune.ipynb` | Current training and test evaluation on a Kaggle T4. `kaggle/` holds the same notebook without outputs plus the kernel metadata used by `kaggle kernels push`. |
 
-## Git hygiene
-A `.gitignore` is included to exclude `.venv/`, `data/`, `models/`, caches, and secrets (e.g., `kaggle.json`). If you already committed large files, run:
+Notebooks 01 and 02 read the dataset from `data/plantvillage/plantvillage dataset/color`. To run them locally:
 ```cmd
-git rm -r --cached .
-git add .
-git commit -m "Apply .gitignore and remove tracked artifacts"
+kaggle datasets download abdallahalidev/plantvillage-dataset -p data/plantvillage --unzip
 ```
 
-## First push to GitHub
-```cmd
-:: inside repo root
-git init
-git add .
-git commit -m "Initial commit: crop disease detection"
-:: create a repo on GitHub, then:
-git remote add origin https://github.com/<your-username>/<your-repo>.git
-git branch -M main
-git push -u origin main
-```
+## Layout
+- `03_demo.py`: Gradio demo (prediction + Grad-CAM)
+- `results/`: test metrics, class names and figures from the Kaggle run
+- `kaggle/`: Kaggle kernel source and metadata
+- `requirements.txt`: dependencies for the demo and the local notebooks
 
-## Files
-- `01_eda_crop_disease.ipynb` – Exploratory data analysis
-- `02_train_model.ipynb` – Training notebook (saves model to `models/`)
-- `03_demo.py` – Gradio demo (loads `models/resnet50_crop_disease.h5`)
-- `requirements.txt` – Reproducible dependencies
-- `.gitignore` – Excludes venv, datasets, models, caches, secrets
+## License
+Code: MIT (see `LICENSE`). The PlantVillage dataset (Kaggle `abdallahalidev/plantvillage-dataset`) is CC BY-NC-SA 4.0; check its terms before any commercial use of the data or of weights trained on it.

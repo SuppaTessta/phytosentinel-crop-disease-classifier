@@ -1,0 +1,15 @@
+{
+  "id": "YOUR_KAGGLE_USERNAME/phytosentinel-resnet50-finetune",
+  "title": "PhytoSentinel ResNet50 Finetune",
+  "code_file": "phytosentinel-resnet50-finetune.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "abdallahalidev/plantvillage-dataset"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}
